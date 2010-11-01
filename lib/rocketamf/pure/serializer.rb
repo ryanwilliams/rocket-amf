@@ -15,7 +15,9 @@ module RocketAMF
         0
       end
 
-      def serialize obj
+      def serialize obj, opts = nil
+        @_serialize_opts = opts || {}
+
         if @ref_cache[obj] != nil
           write_reference @ref_cache[obj]
         elsif obj.respond_to?(:encode_amf)
@@ -128,10 +130,13 @@ module RocketAMF
       private
       include RocketAMF::Pure::WriteIOHelpers
       def write_prop_list obj
+        translate_case = @_serialize_opts[:translate_case]
+
         # Write prop list
         props = RocketAMF::ClassMapper.props_for_serialization obj
         props.sort.each do |key, value| # Sort keys before writing
           key = key.encode("UTF-8").force_encoding("ASCII-8BIT") if key.respond_to?(:encode)
+          key = key.gsub(/(?:_)(.)/) { $1.upcase } if translate_case
           @stream << pack_int16_network(key.bytesize)
           @stream << key
           serialize value
@@ -158,7 +163,9 @@ module RocketAMF
         3
       end
 
-      def serialize obj
+      def serialize obj, opts = nil
+        @_serialize_opts = opts || {}
+
         if obj.respond_to?(:encode_amf)
           obj.encode_amf(self)
         elsif obj.is_a?(NilClass)
@@ -346,8 +353,11 @@ module RocketAMF
         # Write out dynamic properties
         if traits[:dynamic]
           # Write out dynamic properties
+          translate_case = @_serialize_opts[:translate_case]
           props.sort.each do |key, val| # Sort props until Ruby 1.9 becomes common
-            write_utf8_vr key.to_s
+            key = translate_case ? key.to_s.gsub(/(?:_)(.)/) { $1.upcase } : key.to_s
+            puts key
+            write_utf8_vr key
             serialize val
           end
 
