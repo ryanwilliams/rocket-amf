@@ -8,9 +8,12 @@ module RocketAMF
     class Deserializer
       def initialize
         @ref_cache = []
+        @_deserialize_opts = nil
       end
 
-      def deserialize(source, type=nil)
+      def deserialize(source, type=nil, opts=nil)
+        @_deserialize_opts ||= opts || {}
+
         source = StringIO.new(source) unless StringIO === source
         type = read_int8 source unless type
         case type
@@ -69,12 +72,17 @@ module RocketAMF
       end
 
       def read_object source, add_to_ref_cache=true
+        translate_case = @_deserialize_opts[:translate_case]
+
         obj = {}
         @ref_cache << obj if add_to_ref_cache
         while true
           key = read_string source
           type = read_int8 source
           break if type == AMF0_OBJECT_END_MARKER
+
+          key.gsub!(/([A-Z])/) { "_" + $1.downcase } if translate_case
+
           obj[key.to_sym] = deserialize(source, type)
         end
         obj
@@ -86,6 +94,8 @@ module RocketAMF
       end
 
       def read_hash source
+        translate_case = @_deserialize_opts[:translate_case]
+
         len = read_word32_network(source) # Read and ignore length
         obj = {}
         @ref_cache << obj
@@ -93,6 +103,9 @@ module RocketAMF
           key = read_string source
           type = read_int8 source
           break if type == AMF0_OBJECT_END_MARKER
+
+          key.gsub!(/([A-Z])/) { "_" + $1.downcase } if translate_case
+
           obj[key] = deserialize(source, type)
         end
         obj
@@ -138,9 +151,12 @@ module RocketAMF
         @string_cache = []
         @object_cache = []
         @trait_cache = []
+        @_deserialize_opts = nil
       end
 
-      def deserialize(source, type=nil)
+      def deserialize(source, type=nil, opts=nil)
+        @_deserialize_opts ||= opts || {}
+
         source = StringIO.new(source) unless StringIO === source
         type = read_int8 source unless type
         case type
@@ -300,6 +316,8 @@ module RocketAMF
       end
 
       def read_object source
+        translate_case = @_deserialize_opts[:translate_case]
+
         type = read_integer source
         isReference = (type & 0x01) == 0
 
@@ -348,6 +366,7 @@ module RocketAMF
               dynamic_props = {}
               while (key = read_string source) && key.length != 0  do # read next key
                 value = deserialize(source)
+                key.gsub!(/([A-Z])/) { "_" + $1.downcase } if translate_case
                 dynamic_props[key.to_sym] = value
               end
             end
