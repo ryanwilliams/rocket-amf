@@ -100,6 +100,30 @@ describe "when deserializing" do
       output.foo.should == 'bar'
       output.baz.should == nil
     end
+
+    it "should translate case of a hash when explicitly told" do
+      input = "\b\000\000\000\002\000\006mooCow\002\000\004oink\000\006fooBar\002\000\003baz\000\000\t"
+      expected = {'moo_cow' => 'oink', 'foo_bar' => 'baz'}
+
+      output = RocketAMF.deserialize(input, 0, :translate_case => true)
+      output.should == expected
+    end
+
+    it "should not translate case of a hash when explicitly told" do
+      input = "\b\000\000\000\002\000\006mooCow\002\000\004oink\000\006fooBar\002\000\003baz\000\000\t"
+      expected = {'mooCow' => 'oink', 'fooBar' => 'baz'}
+
+      output = RocketAMF.deserialize(input, 0, :translate_case => false)
+      output.should == expected
+    end
+
+    it "should not translate case of a hash unless explicitly told" do
+      input = "\b\000\000\000\002\000\006mooCow\002\000\004oink\000\006fooBar\002\000\003baz\000\000\t"
+      expected = {'mooCow' => 'oink', 'fooBar' => 'baz'}
+
+      output = RocketAMF.deserialize(input, 0)
+      output.should == expected
+    end
   end
 
   describe "AMF3" do
@@ -361,6 +385,30 @@ describe "when deserializing" do
         # child2[:children] = []
         # parent[:parent] = nil
         # parent[:children] = [child1, child2]
+      end
+
+      it "should translate case of a hash when explicitly told" do
+        input = "\n\v\001\015mooCow\006\toink\015fooBar\006\abaz\001"
+        expected = {:moo_cow => 'oink', :foo_bar => 'baz'}
+
+        output = RocketAMF.deserialize(input, 3, :translate_case => true)
+        output.should == expected
+      end
+
+      it "should not translate case of a hash when explicitly told" do
+        input = "\n\v\001\015mooCow\006\toink\015fooBar\006\abaz\001"
+        expected = {:mooCow => 'oink', :fooBar => 'baz'}
+
+        output = RocketAMF.deserialize(input, 3, :translate_case => false)
+        output.should == expected
+      end
+
+      it "should not translate case of a hash unless explicitly told" do
+        input = "\n\v\001\015mooCow\006\toink\015fooBar\006\abaz\001"
+        expected = {:mooCow => 'oink', :fooBar => 'baz'}
+
+        output = RocketAMF.deserialize(input, 3)
+        output.should == expected
       end
     end
   end

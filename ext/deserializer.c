@@ -24,10 +24,35 @@ typedef struct {
     VALUE obj_cache;
     VALUE str_cache;
     VALUE trait_cache;
+    VALUE deserialize_opts;
 } AMF_DESERIALIZER;
 
 static VALUE des0_deserialize_type(AMF_DESERIALIZER *des, char type);
 static VALUE des3_deserialize_internal(AMF_DESERIALIZER *des);
+
+/*
+ * Helper function to convert camelCase to snake_case 
+ * Used by the translate_case option
+ */
+static VALUE snakecase_str(VALUE camel_str) {
+    char snake_str[sizeof(camel_str)*2];
+    char *str = RSTRING_PTR(camel_str);
+    int up = 0, len = 0;
+    char c;
+
+    while (c = *str++) {
+      // If upper case 65-90
+      if (c >= 65 && c <= 90) {
+        snake_str[len++] = *"_";
+        snake_str[len++] = tolower(c);
+      } else {
+        snake_str[len++] = c;
+      }
+    }
+    snake_str[len] = 0;
+
+    return rb_str_new2(snake_str);
+}
 
 static void des_mark(AMF_DESERIALIZER *des) {
     if(!des) return;
@@ -195,13 +220,16 @@ static VALUE des0_read_amf3(AMF_DESERIALIZER *des) {
  * des_read_string or des_read_sym
  */
 static void des0_read_props(AMF_DESERIALIZER *des, VALUE hash, VALUE(*read_key)(AMF_DESERIALIZER*, long)) {
+    VALUE opts = des->deserialize_opts;
+    int translate_case = NIL_P(opts) ? 0 : rb_hash_aref(opts, ID2SYM(rb_intern("translate_case"))) == Qtrue;
+
     while(1) {
         int len = des_read_uint16(des);
         if(len == 0) {
             des_read_byte(des); // Read type byte
             return;
         } else {
-            VALUE key = read_key(des, len);
+            VALUE key = translate_case ? snakecase_str(read_key(des, len)) : read_key(des, len);
             char type = des_read_byte(des);
             rb_hash_aset(hash, key, des0_deserialize_type(des, type));
         }
@@ -316,9 +344,17 @@ static VALUE des0_deserialize_type(AMF_DESERIALIZER *des, char type) {
  *
  * Deserialize the string or StringIO from AMF to a ruby object.
  */
-static VALUE des0_deserialize(VALUE self, VALUE src) {
+static VALUE des0_deserialize(int argc, VALUE *argv, VALUE self) {
+    VALUE src;
+    VALUE opts = Qnil;
+    rb_scan_args(argc, argv, "11", &src, &opts);
+
     AMF_DESERIALIZER *des;
     Data_Get_Struct(self, AMF_DESERIALIZER, des);
+
+    // Save opts in struct so they can be read by the various deserialization functions -- Is there a cleaner way?
+    des->deserialize_opts = opts;
+
     des_set_src(des, src);
     return des0_deserialize_type(des, des_read_byte(des));
 }
@@ -370,6 +406,8 @@ static VALUE des3_read_object(AMF_DESERIALIZER *des) {
     static VALUE class_mapper = 0;
     if(class_mapper == 0) class_mapper = rb_const_get(mRocketAMF, rb_intern("ClassMapper"));
 
+    VALUE opts = des->deserialize_opts;
+
     int header = des_read_int(des);
     if((header & 1) == 0) {
         header >>= 1;
@@ -420,11 +458,12 @@ static VALUE des3_read_object(AMF_DESERIALIZER *des) {
             rb_hash_aset(props, rb_str_intern(RARRAY_PTR(members)[i]), des3_deserialize_internal(des));
         }
 
+        int translate_case = NIL_P(opts) ? Qfalse : rb_hash_aref(opts, ID2SYM(rb_intern("translate_case")));
         VALUE dynamic_props = Qnil;
         if(dynamic == Qtrue) {
             dynamic_props = rb_hash_new();
             while(1) {
-                VALUE key = des3_read_string(des);
+                VALUE key = translate_case ? snakecase_str(des3_read_string(des)) : des3_read_string(des);
                 if(RSTRING_LEN(key) == 0) break;
                 rb_hash_aset(dynamic_props, rb_str_intern(key), des3_deserialize_internal(des));
             }
@@ -582,9 +621,17 @@ static VALUE des3_deserialize_internal(AMF_DESERIALIZER *des) {
  *
  * Deserialize the string or StringIO from AMF to a ruby object.
  */
-static VALUE des3_deserialize(VALUE self, VALUE src) {
+static VALUE des3_deserialize(int argc, VALUE *argv, VALUE self) {
+    VALUE src;
+    VALUE opts = Qnil;
+    rb_scan_args(argc, argv, "11", &src, &opts);
+
     AMF_DESERIALIZER *des;
     Data_Get_Struct(self, AMF_DESERIALIZER, des);
+
+    // Save opts in struct so they can be read by the various deserialization functions -- Is there a cleaner way?
+    des->deserialize_opts = opts;
+
     des_set_src(des, src);
     return des3_deserialize_internal(des);
 }
@@ -593,12 +640,12 @@ void Init_rocket_amf_deserializer() {
     // Define Deserializer
     VALUE cDeserializer = rb_define_class_under(mRocketAMFExt, "Deserializer", rb_cObject);
     rb_define_alloc_func(cDeserializer, des0_alloc);
-    rb_define_method(cDeserializer, "deserialize", des0_deserialize, 1);
+    rb_define_method(cDeserializer, "deserialize", des0_deserialize, -1);
 
     // Define Deserializer
     cAMF3Deserializer = rb_define_class_under(mRocketAMFExt, "AMF3Deserializer", rb_cObject);
     rb_define_alloc_func(cAMF3Deserializer, des3_alloc);
-    rb_define_method(cAMF3Deserializer, "deserialize", des3_deserialize, 1);
+    rb_define_method(cAMF3Deserializer, "deserialize", des3_deserialize, -1);
 
     // Get refs to commonly used symbols and ids
     id_get_ruby_obj = rb_intern("get_ruby_obj");
