@@ -347,7 +347,7 @@ static VALUE des0_deserialize_type(AMF_DESERIALIZER *des, char type) {
 static VALUE des0_deserialize(int argc, VALUE *argv, VALUE self) {
     VALUE src;
     VALUE opts = Qnil;
-    rb_scan_args(argc, argv, "11", &src, &opts);
+    rb_scan_args(argc, argv, "12", &src, NULL, &opts);
 
     AMF_DESERIALIZER *des;
     Data_Get_Struct(self, AMF_DESERIALIZER, des);
