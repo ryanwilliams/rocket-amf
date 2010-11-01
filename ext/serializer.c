@@ -39,10 +39,37 @@ typedef struct {
 typedef struct {
     VALUE ser;
     VALUE extra;
+    VALUE translate_case;
 } ITER_ARGS;
 
-static VALUE ser0_serialize(VALUE self, VALUE obj);
-static VALUE ser3_serialize(VALUE self, VALUE obj);
+static VALUE ser0_serialize(int argc, VALUE *argv, VALUE self);
+static VALUE ser3_serialize(int argc, VALUE *argv, VALUE self);
+
+/*
+ * Helper function to convert snake_case to camelCase
+ * Used by the translate_case option
+ */
+static VALUE camelcase_str(VALUE snake_str) {
+    char camel_str[sizeof(snake_str)];
+    char *str = RSTRING_PTR(snake_str);
+    int up = 0, len = 0;
+    char c;
+
+    while (c = *str++) {
+        if (c == *"_") {
+          up = 1;
+          continue;
+        } else if (up) {
+          up = 0;
+          camel_str[len++] = toupper(c);
+        } else {
+          camel_str[len++] = c;
+        }
+    }
+    camel_str[len] = 0;
+
+    return rb_str_new2(camel_str);
+}
 
 static void ser_free(AMF_SERIALIZER *ser) {
     if(ser->str_cache) st_free_table(ser->str_cache);
@@ -180,7 +207,7 @@ static VALUE ser0_write_array(VALUE self, VALUE ary) {
     ser_write_byte(ser, AMF0_STRICT_ARRAY_MARKER);
     ser_write_uint32(ser, len);
     for(i = 0; i < len; i++) {
-        ser0_serialize(self, RARRAY_PTR(ary)[i]);
+        ser0_serialize(1, &RARRAY_PTR(ary)[i], self);
     }
 
     return self;
@@ -231,9 +258,12 @@ static int ser0_hash_iter(VALUE key, VALUE val, ITER_ARGS *args) {
     AMF_SERIALIZER *ser;
     Data_Get_Struct(args->ser, AMF_SERIALIZER, ser);
 
+    // Translate snake_case to camelCase
+    if (args->translate_case == Qtrue) key = camelcase_str(key);
+
     // Write key and value
     ser0_write_string(ser, key, Qfalse); // Technically incorrect if key length is longer than a 16 bit string, but if you run into that you're screwed anyways
-    ser0_serialize(args->ser, val);
+    ser0_serialize(1, &val, args->ser);
 
     return ST_CONTINUE;
 }
@@ -249,6 +279,9 @@ static VALUE ser0_write_object0(VALUE self, VALUE obj, VALUE props) {
     if(class_mapper == 0) class_mapper = rb_const_get(mRocketAMF, rb_intern("ClassMapper"));
     AMF_SERIALIZER *ser;
     Data_Get_Struct(self, AMF_SERIALIZER, ser);
+
+    // Get out serialization options from the ivar
+    VALUE opts = rb_ivar_get(self, rb_intern("@_serialize_opts"));
 
     // Cache it
     VALUE obj_id = rb_obj_id(obj);
@@ -276,6 +309,7 @@ static VALUE ser0_write_object0(VALUE self, VALUE obj, VALUE props) {
     // Write out data
     ITER_ARGS args;
     args.ser = self;
+    args.translate_case = NIL_P(opts) ? Qfalse : rb_hash_aref(opts, ID2SYM(rb_intern("translate_case")));
 #ifdef SORT_PROPS
     // Sort is required prior to Ruby 1.9 to pass all the tests, as Ruby 1.8 hashes don't store insert order
     VALUE sorted_props = rb_funcall(props, rb_intern("sort"), 0);
@@ -344,7 +378,15 @@ static VALUE ser0_write_date(VALUE self, VALUE date) {
  *
  * Serializes the object to a string and returns that string
  */
-static VALUE ser0_serialize(VALUE self, VALUE obj) {
+static VALUE ser0_serialize(int argc, VALUE *argv, VALUE self) {
+    VALUE obj;
+    VALUE opts = Qnil;
+    rb_scan_args(argc, argv, "11", &obj, &opts);
+
+    // Save opts in an instance var so they can be read by the various serialization functions -- Is there a cleaner way?
+    rb_ivar_set(self, rb_intern("@_serialize_opts"), opts);
+
+
     AMF_SERIALIZER *ser;
     Data_Get_Struct(self, AMF_SERIALIZER, ser);
 
@@ -464,7 +506,7 @@ static VALUE ser3_write_array(VALUE self, VALUE ary) {
     // Write contents
     long i, len = RARRAY_LEN(ary);
     for(i = 0; i < len; i++) {
-        ser3_serialize(self, RARRAY_PTR(ary)[i]);
+        ser3_serialize(1, &RARRAY_PTR(ary)[i], self);
     }
 
     return self;
@@ -521,9 +563,12 @@ static int ser3_hash_iter(VALUE key, VALUE val, ITER_ARGS *args) {
     Data_Get_Struct(args->ser, AMF_SERIALIZER, ser);
 
     if(args->extra == Qnil || rb_funcall(args->extra, id_haskey, 1, key) == Qfalse) {
+        // Translate snake_case to camelCase
+        if (args->translate_case == Qtrue) key = camelcase_str(key);
+
         // Write key and value
         ser3_write_utf8vr(ser, key);
-        ser3_serialize(args->ser, val);
+        ser3_serialize(1, &val, args->ser);
     }
     return ST_CONTINUE;
 }
@@ -542,6 +587,9 @@ static VALUE ser3_write_object0(VALUE self, VALUE obj, VALUE props, VALUE traits
     AMF_SERIALIZER *ser;
     Data_Get_Struct(self, AMF_SERIALIZER, ser);
     long i;
+
+    // Get out serialization options from the ivar
+    VALUE opts = rb_ivar_get(self, rb_intern("@_serialize_opts"));
 
     // Write type marker
     ser_write_byte(ser, AMF3_OBJECT_MARKER);
@@ -617,8 +665,10 @@ static VALUE ser3_write_object0(VALUE self, VALUE obj, VALUE props, VALUE traits
 
     // Write sealed members
     VALUE skipped_members = members_len ? rb_hash_new() : Qnil;
+    VALUE mem = Qnil;
     for(i = 0; i < members_len; i++) {
-        ser3_serialize(self, rb_hash_aref(props, RARRAY_PTR(members)[i]));
+        mem = rb_hash_aref(props, RARRAY_PTR(members)[i]);
+        ser3_serialize(1, &mem, self);
         rb_hash_aset(skipped_members, RARRAY_PTR(members)[i], Qtrue);
     }
 
@@ -627,6 +677,8 @@ static VALUE ser3_write_object0(VALUE self, VALUE obj, VALUE props, VALUE traits
         ITER_ARGS args;
         args.ser = self;
         args.extra = skipped_members;
+        // Default translate_case to false
+        args.translate_case = NIL_P(opts) ? Qfalse : rb_hash_aref(opts, ID2SYM(rb_intern("translate_case")));
 #ifdef SORT_PROPS
         // Sort is required prior to Ruby 1.9 to pass all the tests, as Ruby 1.8 hashes don't store insert order
         VALUE sorted_props = rb_funcall(props, rb_intern("sort"), 0);
@@ -733,7 +785,16 @@ static VALUE ser3_write_byte_array(VALUE self, VALUE ba) {
     ser3_write_utf8vr(ser, rb_funcall(ba, rb_intern("string"), 0));
 }
 
-static VALUE ser3_serialize(VALUE self, VALUE obj) {
+//static VALUE ser3_serialize(VALUE self, VALUE obj) {
+static VALUE ser3_serialize(int argc, VALUE *argv, VALUE self) {
+    VALUE obj;
+    VALUE opts = Qnil;
+    rb_scan_args(argc, argv, "11", &obj, &opts);
+
+    // Save opts in an instance var so they can be read by the various serialization functions -- Is there a cleaner way?
+    rb_ivar_set(self, rb_intern("@_serialize_opts"), opts);
+
+
     AMF_SERIALIZER *ser;
     Data_Get_Struct(self, AMF_SERIALIZER, ser);
 
@@ -803,7 +864,7 @@ void Init_rocket_amf_serializer() {
     VALUE cSerializer = rb_define_class_under(mRocketAMFExt, "Serializer", rb_cObject);
     rb_define_alloc_func(cSerializer, ser0_alloc);
     rb_define_method(cSerializer, "version", ser0_version, 0);
-    rb_define_method(cSerializer, "serialize", ser0_serialize, 1);
+    rb_define_method(cSerializer, "serialize", ser0_serialize, -1);
     rb_define_method(cSerializer, "write_array", ser0_write_array, 1);
     rb_define_method(cSerializer, "write_hash", ser0_write_object, -1);
     rb_define_method(cSerializer, "write_object", ser0_write_object, -1);
@@ -812,7 +873,7 @@ void Init_rocket_amf_serializer() {
     VALUE cAMF3Serializer = rb_define_class_under(mRocketAMFExt, "AMF3Serializer", rb_cObject);
     rb_define_alloc_func(cAMF3Serializer, ser3_alloc);
     rb_define_method(cAMF3Serializer, "version", ser3_version, 0);
-    rb_define_method(cAMF3Serializer, "serialize", ser3_serialize, 1);
+    rb_define_method(cAMF3Serializer, "serialize", ser3_serialize, -1);
     rb_define_method(cAMF3Serializer, "write_array", ser3_write_array, 1);
     rb_define_method(cAMF3Serializer, "write_object", ser3_write_object, -1);
 

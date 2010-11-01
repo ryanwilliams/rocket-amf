@@ -104,11 +104,11 @@ module RocketAMF
 
   # Serialize the given Ruby data structure _obj_ into an AMF stream using the
   # given AMF version
-  def self.serialize obj, amf_version = 0
+  def self.serialize obj, amf_version = 0, opts = nil
     if amf_version == 0
-      RocketAMF::Serializer.new.serialize(obj)
+      RocketAMF::Serializer.new.serialize(obj, opts)
     elsif amf_version == 3
-      RocketAMF::AMF3Serializer.new.serialize(obj)
+      RocketAMF::AMF3Serializer.new.serialize(obj, opts)
     else
       raise AMFError, "unsupported version #{amf_version}"
     end
