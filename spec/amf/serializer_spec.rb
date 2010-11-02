@@ -92,23 +92,26 @@ describe "when serializing" do
 
     it "should translate case of a hash when explicitly told" do
       input = {'moo_cow' => 'oink', 'foo_bar' => 'baz'}
-      expected = "\b\000\000\000\002\000\006mooCow\002\000\004oink\000\006fooBar\002\000\003baz\000\000\t"
+      expected = "\020\000\avo.Hash\000\006mooCow\002\000\004oink\000\006fooBar\002\000\003baz\000\000\t"
+      RocketAMF::ClassMapper.define {|m| m.map :as => 'vo.Hash', :ruby => 'Hash', :translate_case => true}
 
-      output = RocketAMF.serialize(input, 0, :translate_case => true)
+      output = RocketAMF.serialize(input, 0)
       output.should == expected
     end
 
     it "should not translate case of a hash when explicitly told" do
       input = {'moo_cow' => 'oink', 'foo_bar' => 'baz'}
-      expected = "\b\000\000\000\002\000\amoo_cow\002\000\004oink\000\afoo_bar\002\000\003baz\000\000\t"
+      expected = "\020\000\avo.Hash\000\amoo_cow\002\000\004oink\000\afoo_bar\002\000\003baz\000\000\t"
+      RocketAMF::ClassMapper.define {|m| m.map :as => 'vo.Hash', :ruby => 'Hash', :translate_case => false}
 
-      output = RocketAMF.serialize(input, 0, :translate_case => false)
+      output = RocketAMF.serialize(input, 0)
       output.should == expected
     end
 
     it "should not translate case of a hash unless explicitly told" do
       input = {'moo_cow' => 'oink', 'foo_bar' => 'baz'}
-      expected = "\b\000\000\000\002\000\amoo_cow\002\000\004oink\000\afoo_bar\002\000\003baz\000\000\t"
+      expected = "\020\000\avo.Hash\000\amoo_cow\002\000\004oink\000\afoo_bar\002\000\003baz\000\000\t"
+      RocketAMF::ClassMapper.define {|m| m.map :as => 'vo.Hash', :ruby => 'Hash'}
 
       output = RocketAMF.serialize(input, 0)
       output.should == expected
@@ -432,23 +435,27 @@ describe "when serializing" do
 
     it "should translate case of a hash when explicitly told" do
       input = {'moo_cow' => 'oink', 'foo_bar' => 'baz'}
-      expected = "\n\v\001\015mooCow\006\toink\015fooBar\006\abaz\001"
+      RocketAMF::ClassMapper.define {|m| m.map :as => 'vo.Hash', :ruby => 'Hash', :translate_case => true}
 
-      output = RocketAMF.serialize(input, 3, :translate_case => true)
+      expected = "\n\v\017vo.Hash\rmooCow\006\toink\rfooBar\006\abaz\001"
+
+      output = RocketAMF.serialize(input, 3)
       output.should == expected
     end
 
     it "should not translate case of a hash when explicitly told" do
       input = {'moo_cow' => 'oink', 'foo_bar' => 'baz'}
-      expected = "\n\v\001\017moo_cow\006\toink\017foo_bar\006\abaz\001"
+      RocketAMF::ClassMapper.define {|m| m.map :as => 'vo.Hash', :ruby => 'Hash', :translate_case => false}
+      expected = "\n\v\017vo.Hash\017moo_cow\006\toink\017foo_bar\006\abaz\001"
 
-      output = RocketAMF.serialize(input, 3, :translate_case => false)
+      output = RocketAMF.serialize(input, 3)
       output.should == expected
     end
 
     it "should not translate case of a hash unless explicitly told" do
       input = {'moo_cow' => 'oink', 'foo_bar' => 'baz'}
-      expected = "\n\v\001\017moo_cow\006\toink\017foo_bar\006\abaz\001"
+      RocketAMF::ClassMapper.define {|m| m.map :as => 'vo.Hash', :ruby => 'Hash'}
+      expected = "\n\v\017vo.Hash\017moo_cow\006\toink\017foo_bar\006\abaz\001"
 
       output = RocketAMF.serialize(input, 3)
       output.should == expected

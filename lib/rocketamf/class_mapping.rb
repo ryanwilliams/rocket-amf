@@ -77,7 +77,9 @@ module RocketAMF
     class MappingSet
       def initialize #:nodoc:
         @as_mappings = {}
+        @as_options = {} # Options for transforming to AS
         @ruby_mappings = {}
+        @ruby_options = {} # Options for transforming to Ruby
 
         # Map defaults
         map :as => 'flex.messaging.messages.AbstractMessage', :ruby => 'RocketAMF::Values::AbstractMessage'
@@ -100,6 +102,10 @@ module RocketAMF
         [:as, :ruby].each {|k| params[k] = params[k].to_s} # Convert params to strings
         @as_mappings[params[:as]] = params[:ruby]
         @ruby_mappings[params[:ruby]] = params[:as]
+
+        # Add translate_case option to both sides
+        @as_options[params[:as]] = {'translate_case' => !!params[:translate_case]}
+        @ruby_options[params[:ruby]] = {'translate_case' => !!params[:translate_case]}
       end
 
       # Returns the AS class name for the given ruby class name, returing nil if
@@ -112,6 +118,18 @@ module RocketAMF
       # not found
       def get_ruby_class_name class_name #:nodoc:
         @as_mappings[class_name.to_s]
+      end
+
+      # Returns an option for AS serialization, returning nil if not found
+      def get_as_option class_name, option_name
+        return nil if @as_options[class_name.to_s].nil?
+        @as_options[class_name.to_s][option_name.to_s]
+      end
+
+      # Returns an option for Ruby serialization, returning nil if not found
+      def get_ruby_option class_name, option_name
+        return nil if @ruby_options[class_name.to_s].nil?
+        @ruby_options[class_name.to_s][option_name.to_s]
       end
     end
 
@@ -193,6 +211,23 @@ module RocketAMF
         end
       end
       obj
+    end
+
+    def get_as_option *args
+      mappings.get_as_option *args
+    end
+
+    def get_ruby_option obj, option_name
+      # Get class name
+      if obj.is_a?(String)
+        ruby_class_name = obj
+      elsif obj.is_a?(Values::TypedHash)
+        ruby_class_name = obj.type
+      else
+        ruby_class_name = obj.class.name
+      end
+
+      mappings.get_ruby_option ruby_class_name, option_name
     end
 
     # Extracts all exportable properties from the given ruby object and returns

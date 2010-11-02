@@ -15,6 +15,7 @@ extern VALUE sym_externalizable;
 extern VALUE sym_dynamic;
 ID id_get_ruby_obj;
 ID id_populate_ruby_obj;
+ID id_get_ruby_option;
 
 typedef struct {
     VALUE src;
@@ -24,7 +25,6 @@ typedef struct {
     VALUE obj_cache;
     VALUE str_cache;
     VALUE trait_cache;
-    VALUE deserialize_opts;
 } AMF_DESERIALIZER;
 
 static VALUE des0_deserialize_type(AMF_DESERIALIZER *des, char type);
@@ -219,10 +219,7 @@ static VALUE des0_read_amf3(AMF_DESERIALIZER *des) {
  * Reads an AMF0 hash, with a configurable key reading function - either
  * des_read_string or des_read_sym
  */
-static void des0_read_props(AMF_DESERIALIZER *des, VALUE hash, VALUE(*read_key)(AMF_DESERIALIZER*, long)) {
-    VALUE opts = des->deserialize_opts;
-    int translate_case = NIL_P(opts) ? 0 : rb_hash_aref(opts, ID2SYM(rb_intern("translate_case"))) == Qtrue;
-
+static void des0_read_props(AMF_DESERIALIZER *des, VALUE hash, VALUE(*read_key)(AMF_DESERIALIZER*, long), int translate_case) {
     while(1) {
         int len = des_read_uint16(des);
         if(len == 0) {
@@ -239,7 +236,7 @@ static void des0_read_props(AMF_DESERIALIZER *des, VALUE hash, VALUE(*read_key)(
 static VALUE des0_read_object(AMF_DESERIALIZER *des) {
     VALUE obj = rb_hash_new();
     rb_ary_push(des->obj_cache, obj);
-    des0_read_props(des, obj, des_read_sym);
+    des0_read_props(des, obj, des_read_sym, 0);
     return obj;
 }
 
@@ -252,19 +249,31 @@ static VALUE des0_read_typed_object(AMF_DESERIALIZER *des) {
     VALUE obj = rb_funcall(class_mapper, id_get_ruby_obj, 1, class_name);
     rb_ary_push(des->obj_cache, obj);
 
+    int translate_case = rb_funcall(class_mapper, id_get_ruby_option, 2, obj, rb_str_new2("translate_case")) == Qtrue;
+
     // Populate object
     VALUE props = rb_hash_new();
-    des0_read_props(des, props, des_read_sym);
+    des0_read_props(des, props, des_read_sym, translate_case);
     rb_funcall(class_mapper, id_populate_ruby_obj, 2, obj, props);
 
     return obj;
 }
 
 static VALUE des0_read_hash(AMF_DESERIALIZER *des) {
+    static VALUE class_mapper = 0;
+    if(class_mapper == 0) class_mapper = rb_const_get(mRocketAMF, rb_intern("ClassMapper"));
+
+    VALUE obj = rb_funcall(class_mapper, id_get_ruby_obj, 1, rb_str_new2("Hash"));
+    int translate_case = 0;
+    if (obj != Qnil) {
+      translate_case = rb_funcall(class_mapper, id_get_ruby_option, 2, obj, rb_str_new2("translate_case")) == Qtrue;
+    } else {
+      obj = rb_hash_new();
+    }
+
     des_read_uint32(des); // Hash size, but there's no optimization I can perform with this
-    VALUE obj = rb_hash_new();
     rb_ary_push(des->obj_cache, obj);
-    des0_read_props(des, obj, des_read_string);
+    des0_read_props(des, obj, des_read_string, translate_case);
     return obj;
 }
 
@@ -344,16 +353,9 @@ static VALUE des0_deserialize_type(AMF_DESERIALIZER *des, char type) {
  *
  * Deserialize the string or StringIO from AMF to a ruby object.
  */
-static VALUE des0_deserialize(int argc, VALUE *argv, VALUE self) {
-    VALUE src;
-    VALUE opts = Qnil;
-    rb_scan_args(argc, argv, "12", &src, NULL, &opts);
-
+static VALUE des0_deserialize(VALUE self, VALUE src) {
     AMF_DESERIALIZER *des;
     Data_Get_Struct(self, AMF_DESERIALIZER, des);
-
-    // Save opts in struct so they can be read by the various deserialization functions -- Is there a cleaner way?
-    des->deserialize_opts = opts;
 
     des_set_src(des, src);
     return des0_deserialize_type(des, des_read_byte(des));
@@ -406,8 +408,6 @@ static VALUE des3_read_object(AMF_DESERIALIZER *des) {
     static VALUE class_mapper = 0;
     if(class_mapper == 0) class_mapper = rb_const_get(mRocketAMF, rb_intern("ClassMapper"));
 
-    VALUE opts = des->deserialize_opts;
-
     int header = des_read_int(des);
     if((header & 1) == 0) {
         header >>= 1;
@@ -458,7 +458,7 @@ static VALUE des3_read_object(AMF_DESERIALIZER *des) {
             rb_hash_aset(props, rb_str_intern(RARRAY_PTR(members)[i]), des3_deserialize_internal(des));
         }
 
-        int translate_case = NIL_P(opts) ? Qfalse : rb_hash_aref(opts, ID2SYM(rb_intern("translate_case")));
+        int translate_case = rb_funcall(class_mapper, id_get_ruby_option, 2, obj, rb_str_new2("translate_case")) == Qtrue;
         VALUE dynamic_props = Qnil;
         if(dynamic == Qtrue) {
             dynamic_props = rb_hash_new();
@@ -621,16 +621,9 @@ static VALUE des3_deserialize_internal(AMF_DESERIALIZER *des) {
  *
  * Deserialize the string or StringIO from AMF to a ruby object.
  */
-static VALUE des3_deserialize(int argc, VALUE *argv, VALUE self) {
-    VALUE src;
-    VALUE opts = Qnil;
-    rb_scan_args(argc, argv, "11", &src, &opts);
-
+static VALUE des3_deserialize(VALUE self, VALUE src) {
     AMF_DESERIALIZER *des;
     Data_Get_Struct(self, AMF_DESERIALIZER, des);
-
-    // Save opts in struct so they can be read by the various deserialization functions -- Is there a cleaner way?
-    des->deserialize_opts = opts;
 
     des_set_src(des, src);
     return des3_deserialize_internal(des);
@@ -640,14 +633,15 @@ void Init_rocket_amf_deserializer() {
     // Define Deserializer
     VALUE cDeserializer = rb_define_class_under(mRocketAMFExt, "Deserializer", rb_cObject);
     rb_define_alloc_func(cDeserializer, des0_alloc);
-    rb_define_method(cDeserializer, "deserialize", des0_deserialize, -1);
+    rb_define_method(cDeserializer, "deserialize", des0_deserialize, 1);
 
     // Define Deserializer
     cAMF3Deserializer = rb_define_class_under(mRocketAMFExt, "AMF3Deserializer", rb_cObject);
     rb_define_alloc_func(cAMF3Deserializer, des3_alloc);
-    rb_define_method(cAMF3Deserializer, "deserialize", des3_deserialize, -1);
+    rb_define_method(cAMF3Deserializer, "deserialize", des3_deserialize, 1);
 
     // Get refs to commonly used symbols and ids
     id_get_ruby_obj = rb_intern("get_ruby_obj");
     id_populate_ruby_obj = rb_intern("populate_ruby_obj");
+    id_get_ruby_option = rb_intern("get_ruby_option");
 }
