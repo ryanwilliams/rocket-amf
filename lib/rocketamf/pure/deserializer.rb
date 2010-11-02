@@ -8,12 +8,9 @@ module RocketAMF
     class Deserializer
       def initialize
         @ref_cache = []
-        @_deserialize_opts = nil
       end
 
-      def deserialize(source, type=nil, opts=nil)
-        @_deserialize_opts ||= opts || {}
-
+      def deserialize(source, type=nil)
         source = StringIO.new(source) unless StringIO === source
         type = read_int8 source unless type
         case type
@@ -71,9 +68,7 @@ module RocketAMF
         str
       end
 
-      def read_object source, add_to_ref_cache=true
-        translate_case = @_deserialize_opts[:translate_case]
-
+      def read_object source, add_to_ref_cache=true, translate_case=false
         obj = {}
         @ref_cache << obj if add_to_ref_cache
         while true
@@ -94,7 +89,8 @@ module RocketAMF
       end
 
       def read_hash source
-        translate_case = @_deserialize_opts[:translate_case]
+        class_name = RocketAMF::ClassMapper.get_as_class_name 'Hash'
+        translate_case = RocketAMF::ClassMapper.get_as_option(class_name, 'translate_case')
 
         len = read_word32_network(source) # Read and ignore length
         obj = {}
@@ -132,11 +128,14 @@ module RocketAMF
       def read_typed_object source
         # Create object to add to ref cache
         class_name = read_string source
+        translate_case = RocketAMF::ClassMapper.get_as_option(class_name, 'translate_case')
+
         obj = RocketAMF::ClassMapper.get_ruby_obj class_name
         @ref_cache << obj
 
+
         # Read object props
-        props = read_object source, false
+        props = read_object source, false, translate_case
 
         # Populate object
         RocketAMF::ClassMapper.populate_ruby_obj obj, props
@@ -151,12 +150,9 @@ module RocketAMF
         @string_cache = []
         @object_cache = []
         @trait_cache = []
-        @_deserialize_opts = nil
       end
 
       def deserialize(source, type=nil, opts=nil)
-        @_deserialize_opts ||= opts || {}
-
         source = StringIO.new(source) unless StringIO === source
         type = read_int8 source unless type
         case type
@@ -316,8 +312,6 @@ module RocketAMF
       end
 
       def read_object source
-        translate_case = @_deserialize_opts[:translate_case]
-
         type = read_integer source
         isReference = (type & 0x01) == 0
 
@@ -363,6 +357,7 @@ module RocketAMF
 
             dynamic_props = nil
             if traits[:dynamic]
+              translate_case = RocketAMF::ClassMapper.get_as_option(traits[:class_name], 'translate_case')
               dynamic_props = {}
               while (key = read_string source) && key.length != 0  do # read next key
                 value = deserialize(source)

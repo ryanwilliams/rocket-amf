@@ -15,9 +15,7 @@ module RocketAMF
         0
       end
 
-      def serialize obj, opts = nil
-        @_serialize_opts = opts || {}
-
+      def serialize obj
         if @ref_cache[obj] != nil
           write_reference @ref_cache[obj]
         elsif obj.respond_to?(:encode_amf)
@@ -102,10 +100,12 @@ module RocketAMF
       end
 
       def write_hash hash
+        class_name = RocketAMF::ClassMapper.get_as_class_name 'Hash'
+        translate_case = RocketAMF::ClassMapper.get_as_option(class_name, 'translate_case')
         @ref_cache.add_obj hash
         @stream << AMF0_HASH_MARKER
         @stream << pack_word32_network(hash.length)
-        write_prop_list RocketAMF::ClassMapper.props_for_serialization(hash)
+        write_prop_list RocketAMF::ClassMapper.props_for_serialization(hash), translate_case
       end
 
       def write_object obj, props=nil
@@ -115,6 +115,7 @@ module RocketAMF
 
         # Is it a typed object?
         class_name = RocketAMF::ClassMapper.get_as_class_name obj
+        translate_case = RocketAMF::ClassMapper.get_as_option(class_name, 'translate_case')
         if class_name
           class_name = class_name.encode("UTF-8").force_encoding("ASCII-8BIT") if class_name.respond_to?(:encode)
           @stream << AMF0_TYPED_OBJECT_MARKER
@@ -124,14 +125,12 @@ module RocketAMF
           @stream << AMF0_OBJECT_MARKER
         end
 
-        write_prop_list props
+        write_prop_list props, translate_case
       end
 
       private
       include RocketAMF::Pure::WriteIOHelpers
-      def write_prop_list obj
-        translate_case = @_serialize_opts[:translate_case]
-
+      def write_prop_list obj, translate_case = false
         # Write prop list
         props = RocketAMF::ClassMapper.props_for_serialization obj
         props.sort.each do |key, value| # Sort keys before writing
@@ -163,9 +162,7 @@ module RocketAMF
         3
       end
 
-      def serialize obj, opts = nil
-        @_serialize_opts = opts || {}
-
+      def serialize obj
         if obj.respond_to?(:encode_amf)
           obj.encode_amf(self)
         elsif obj.is_a?(NilClass)
@@ -353,10 +350,9 @@ module RocketAMF
         # Write out dynamic properties
         if traits[:dynamic]
           # Write out dynamic properties
-          translate_case = @_serialize_opts[:translate_case]
+          translate_case = RocketAMF::ClassMapper.get_as_option(traits[:class_name], 'translate_case')
           props.sort.each do |key, val| # Sort props until Ruby 1.9 becomes common
             key = translate_case ? key.to_s.gsub(/(?:_)(.)/) { $1.upcase } : key.to_s
-            puts key
             write_utf8_vr key
             serialize val
           end
