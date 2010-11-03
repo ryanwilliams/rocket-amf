@@ -349,15 +349,17 @@ module RocketAMF
           if traits[:externalizable]
             obj.externalized_data = deserialize(source)
           else
+            translate_case = RocketAMF::ClassMapper.get_as_option(traits[:class_name], 'translate_case')
+
             props = {}
             traits[:members].each do |key|
               value = deserialize(source)
+              key.gsub!(/([A-Z])/) { "_" + $1.downcase } if translate_case
               props[key.to_sym] = value
             end
 
             dynamic_props = nil
             if traits[:dynamic]
-              translate_case = RocketAMF::ClassMapper.get_as_option(traits[:class_name], 'translate_case')
               dynamic_props = {}
               while (key = read_string source) && key.length != 0  do # read next key
                 value = deserialize(source)

@@ -453,12 +453,14 @@ static VALUE des3_read_object(AMF_DESERIALIZER *des) {
             return Qnil;
         }
 
+        int translate_case = rb_funcall(class_mapper, id_get_ruby_option, 2, obj, rb_str_new2("translate_case")) == Qtrue;
+
         VALUE props = rb_hash_new();
         for(i = 0; i < members_len; i++) {
-            rb_hash_aset(props, rb_str_intern(RARRAY_PTR(members)[i]), des3_deserialize_internal(des));
+            VALUE key = rb_str_intern(translate_case ? snakecase_str(RARRAY_PTR(members)[i]) : RARRAY_PTR(members)[i]);
+            rb_hash_aset(props, key, des3_deserialize_internal(des));
         }
 
-        int translate_case = rb_funcall(class_mapper, id_get_ruby_option, 2, obj, rb_str_new2("translate_case")) == Qtrue;
         VALUE dynamic_props = Qnil;
         if(dynamic == Qtrue) {
             dynamic_props = rb_hash_new();
