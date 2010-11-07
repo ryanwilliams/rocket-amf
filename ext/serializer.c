@@ -51,7 +51,7 @@ static VALUE ser3_serialize(VALUE self, VALUE obj);
  * Used by the translate_case option
  */
 static VALUE camelcase_str(VALUE snake_str) {
-    char camel_str[sizeof(snake_str)];
+    char camel_str[strlen(snake_str)];
     char *str = RSTRING_PTR(snake_str);
     int up = 0, len = 0;
     char c;
@@ -67,9 +67,9 @@ static VALUE camelcase_str(VALUE snake_str) {
           camel_str[len++] = c;
         }
     }
-    camel_str[len] = 0;
+    camel_str[len] = '\0';
 
-    return rb_str_new2(camel_str);
+    return rb_str_new(camel_str, len);
 }
 
 static void ser_free(AMF_SERIALIZER *ser) {
@@ -554,7 +554,9 @@ static int ser3_hash_iter(VALUE key, VALUE val, ITER_ARGS *args) {
 
     if(args->extra == Qnil || rb_funcall(args->extra, id_haskey, 1, key) == Qfalse) {
         // Translate snake_case to camelCase
-        if (args->translate_case == Qtrue) key = camelcase_str(key);
+        if (args->translate_case == Qtrue) {
+            key = camelcase_str(key);
+        }
 
         // Write key and value
         ser3_write_utf8vr(ser, key);
