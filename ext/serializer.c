@@ -51,8 +51,8 @@ static VALUE ser3_serialize(VALUE self, VALUE obj);
  * Used by the translate_case option
  */
 static VALUE camelcase_str(VALUE snake_str) {
-    char camel_str[strlen(snake_str)];
     char *str = RSTRING_PTR(snake_str);
+    char camel_str[strlen(str)];
     int up = 0, len = 0;
     char c;
 

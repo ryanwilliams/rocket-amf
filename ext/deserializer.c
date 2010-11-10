@@ -35,8 +35,8 @@ static VALUE des3_deserialize_internal(AMF_DESERIALIZER *des);
  * Used by the translate_case option
  */
 static VALUE snakecase_str(VALUE camel_str) {
-    char snake_str[sizeof(camel_str)*2];
     char *str = RSTRING_PTR(camel_str);
+    char snake_str[strlen(str)*2];
     int up = 0, len = 0;
     char c;
 
