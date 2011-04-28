@@ -8,6 +8,13 @@ describe "when deserializing" do
   end
 
   describe "AMF0" do
+    it "should update source pos if source is a StringIO object" do
+      input = StringIO.new(object_fixture('amf0-number.bin'))
+      input.pos.should == 0
+      output = RocketAMF.deserialize(input, 0)
+      input.pos.should == 9
+    end
+
     it "should deserialize numbers" do
       input = object_fixture('amf0-number.bin')
       output = RocketAMF.deserialize(input, 0)
@@ -130,6 +137,13 @@ describe "when deserializing" do
   end
 
   describe "AMF3" do
+    it "should update source pos if source is a StringIO object" do
+      input = StringIO.new(object_fixture('amf3-null.bin'))
+      input.pos.should == 0
+      output = RocketAMF.deserialize(input, 3)
+      input.pos.should == 1
+    end
+
     describe "simple messages" do
       it "should deserialize a null" do
         input = object_fixture("amf3-null.bin")
@@ -235,6 +249,17 @@ describe "when deserializing" do
         output.baz.should == nil
       end
 
+      it "should deserialize externalizable objects" do
+        RocketAMF::ClassMapper.define {|m| m.map :as => 'ExternalizableTest', :ruby => 'ExternalizableTest'}
+
+        input = object_fixture("amf3-externalizable.bin")
+        output = RocketAMF.deserialize(input, 3)
+
+        output.length.should == 2
+        output[0].one.should == 5
+        output[1].two.should == 5
+      end
+
       it "should deserialize a hash as a dynamic anonymous object" do
         input = object_fixture("amf3-hash.bin")
         output = RocketAMF.deserialize(input, 3)
@@ -261,6 +286,23 @@ describe "when deserializing" do
         h2 = {:foo_two => ""}
         so1 = {:foo_three => 42}
         output.should == [h1, h2, so1, {:foo_three => nil}, {}, [h1, h2, so1], [], 42, "", [], "", {}, "bar_one", so1]
+      end
+
+      it "should deserialize an array collection as an array" do
+        input = object_fixture("amf3-arrayCollection.bin")
+        output = RocketAMF.deserialize(input, 3)
+
+        output.class.should == Array
+        output.should == ["foo", "bar"]
+      end
+
+      it "should deserialize a complex set of array collections" do
+        input = object_fixture('amf3-complexArrayCollection.bin')
+        output = RocketAMF.deserialize(input, 3)
+
+        output[0].should == ["foo", "bar"]
+        output[1].should == ["bar", "foo"]
+        output[2].should === output[1]
       end
 
       it "should deserialize a byte array" do

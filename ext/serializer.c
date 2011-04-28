@@ -1,13 +1,11 @@
-#include <ruby.h>
-#include <ruby/st.h>
-#ifdef HAVE_RB_STR_ENCODE
-#include <ruby/encoding.h>
-#endif
+#include "serializer.h"
 #include "constants.h"
 #include "utility.h"
 
 extern VALUE mRocketAMF;
 extern VALUE mRocketAMFExt;
+extern VALUE cSerializer;
+extern VALUE cAMF3Serializer;
 extern VALUE cStringIO;
 extern VALUE cDate;
 extern VALUE cDateTime;
@@ -15,36 +13,18 @@ extern VALUE sym_class_name;
 extern VALUE sym_members;
 extern VALUE sym_externalizable;
 extern VALUE sym_dynamic;
+VALUE cArrayCollection;
 ID id_size;
 ID id_haskey;
 ID id_encode_amf;
+ID id_is_array_collection;
+ID id_use_array_collection;
 ID id_get_as_class_name;
 ID id_props_for_serialization;
 ID id_utc;
 ID id_to_f;
 ID id_get_as_option;
 
-typedef struct {
-    char* stream;
-    long len;
-    long size;
-    int depth;
-    st_table* str_cache;
-    long str_index;
-    st_table* trait_cache;
-    long trait_index;
-    st_table* obj_cache;
-    long obj_index;
-} AMF_SERIALIZER;
-
-typedef struct {
-    VALUE ser;
-    VALUE extra;
-    VALUE translate_case;
-} ITER_ARGS;
-
-static VALUE ser0_serialize(VALUE self, VALUE obj);
-static VALUE ser3_serialize(VALUE self, VALUE obj);
 
 /*
  * Helper function to convert snake_case to camelCase
@@ -72,33 +52,44 @@ static VALUE camelcase_str(VALUE snake_str) {
     return rb_str_new(camel_str, len);
 }
 
+/*
+ * Mark the stream
+ */
+static void ser_mark(AMF_SERIALIZER *ser) {
+    if(!ser) return;
+    rb_gc_mark(ser->stream);
+}
+
+/*
+ * Free cache tables, stream and the struct itself
+ */
 static void ser_free(AMF_SERIALIZER *ser) {
     if(ser->str_cache) st_free_table(ser->str_cache);
     if(ser->trait_cache) st_free_table(ser->trait_cache);
-    st_free_table(ser->obj_cache);
-    xfree(ser->stream);
+    if(ser->obj_cache) st_free_table(ser->obj_cache);
     xfree(ser);
 }
 
-static void ser_write(AMF_SERIALIZER *ser, const char* str, long len) {
-    long needed = ser->len + len + 1;
-    if(needed > ser->size) {
-        // Keep multiplying size by 2 until we can contain it plus 1 (for null)
-        while(needed > ser->size) ser->size *= 2;
-        if(ser->size > MAX_STREAM_LENGTH) rb_raise(rb_eRangeError, "Stream larger than MAX_STREAM_LENGTH");
-        REALLOC_N(ser->stream, char, ser->size);
-    }
-    memcpy(ser->stream + ser->len, str, len);
-    ser->len += len;
-    ser->stream[ser->len] = '\0';
+/*
+ * Create new struct and wrap with class
+ */
+static VALUE ser_alloc(VALUE klass) {
+    // Allocate struct
+    AMF_SERIALIZER *ser = ALLOC(AMF_SERIALIZER);
+    memset(ser, 0, sizeof(AMF_SERIALIZER));
+
+    // Initialize stream
+    ser->stream = rb_str_buf_new(0);
+
+    return Data_Wrap_Struct(klass, ser_mark, ser_free, ser);
 }
 
-static void ser_write_byte(AMF_SERIALIZER *ser, char byte) {
+void ser_write_byte(AMF_SERIALIZER *ser, char byte) {
     char bytes[2] = {byte, '\0'};
-    ser_write(ser, bytes, 1);
+    rb_str_buf_cat(ser->stream, bytes, 1);
 }
 
-static void ser_write_int(AMF_SERIALIZER *ser, int num) {
+void ser_write_int(AMF_SERIALIZER *ser, int num) {
     char tmp[4];
     int tmp_len;
 
@@ -125,22 +116,22 @@ static void ser_write_int(AMF_SERIALIZER *ser, int num) {
         rb_raise(rb_eRangeError, "int %d out of range", num);
     }
 
-    ser_write(ser, tmp, tmp_len);
+    rb_str_buf_cat(ser->stream, tmp, tmp_len);
 }
 
-static void ser_write_uint16(AMF_SERIALIZER *ser, long num) {
-    if(num > 0xffff || num < 0) rb_raise(rb_eRangeError, "int %ld out of range", num);
+void ser_write_uint16(AMF_SERIALIZER *ser, long num) {
+    if(num > 0xffff) rb_raise(rb_eRangeError, "int %ld out of range", num);
     char tmp[2] = {(num >> 8) & 0xff, num & 0xff};
-    ser_write(ser, tmp, 2);
+    rb_str_buf_cat(ser->stream, tmp, 2);
 }
 
-static void ser_write_uint32(AMF_SERIALIZER *ser, long num) {
-    if(num > 0xffffffff || num < 0) rb_raise(rb_eRangeError, "int %ld out of range", num);
+void ser_write_uint32(AMF_SERIALIZER *ser, long num) {
+    if(num > 0xffffffff) rb_raise(rb_eRangeError, "int %ld out of range", num);
 	char tmp[4] = {(num >> 24) & 0xff, (num >> 16) & 0xff, (num >> 8) & 0xff, num & 0xff};
-	ser_write(ser, tmp, 4);
+	rb_str_buf_cat(ser->stream, tmp, 4);
 }
 
-static void ser_write_double(AMF_SERIALIZER *ser, double num) {
+void ser_write_double(AMF_SERIALIZER *ser, double num) {
 	union aligned {
 		double dval;
 		char cval[8];
@@ -149,32 +140,41 @@ static void ser_write_double(AMF_SERIALIZER *ser, double num) {
 	d.dval = num;
 
 #ifdef WORDS_BIGENDIAN
-    ser_write(ser, number, 8);
+    rb_str_buf_cat(ser->stream, number, 8);
 #else
     char netnum[8] = {number[7],number[6],number[5],number[4],number[3],number[2],number[1],number[0]};
-    ser_write(ser, netnum, 8);
+    rb_str_buf_cat(ser->stream, netnum, 8);
 #endif
 }
 
-/*
- * Allocate new serializer, allocate character array for output, and initialize
- * object cache
- */
-static VALUE ser0_alloc(VALUE klass) {
-    AMF_SERIALIZER *ser = ALLOC(AMF_SERIALIZER);
-    memset(ser, 0, sizeof(AMF_SERIALIZER));
-    VALUE self = Data_Wrap_Struct(klass, NULL, ser_free, ser);
+void ser_get_string(VALUE obj, VALUE encode, char** str, long* len) {
+    int type = TYPE(obj);
+    if(type == T_STRING) {
+#ifdef HAVE_RB_STR_ENCODE
+        if(encode == Qtrue) {
+            rb_encoding *enc = rb_enc_get(obj);
+            if (enc != rb_ascii8bit_encoding()) {
+                rb_encoding *utf8 = rb_utf8_encoding();
+                if (enc != utf8) obj = rb_str_encode(obj, rb_enc_from_encoding(utf8), 0, Qnil);
+            }
+        }
+#endif
+        *str = RSTRING_PTR(obj);
+        *len = RSTRING_LEN(obj);
+    } else if(type == T_SYMBOL) {
+        *str = (char*)rb_id2name(SYM2ID(obj));
+        *len = strlen(*str);
+    } else if(obj == Qnil) {
+        *len = 0;
+    } else {
+        rb_raise(rb_eArgError, "Invalid type in ser_get_string: %d", type);
+    }
+}
 
-    // Initialize stream
-    ser->stream = ALLOC_N(char, INITIAL_STREAM_LENGTH);
-    ser->len = 0;
-    ser->size = INITIAL_STREAM_LENGTH;
-
-    // Initialize caches
-    ser->obj_cache = st_init_numtable();
-    ser->obj_index = 0;
-
-    return self;
+static VALUE ser_stream(VALUE self) {
+    AMF_SERIALIZER *ser;
+    Data_Get_Struct(self, AMF_SERIALIZER, ser);
+    return ser->stream;
 }
 
 /*
@@ -220,27 +220,12 @@ static VALUE ser0_write_array(VALUE self, VALUE ary) {
  * parameter should be set to Qfalse instead of Qtrue.
  */
 static void ser0_write_string(AMF_SERIALIZER *ser, VALUE obj, VALUE write_marker) {
-    const char* str;
+    // Extract char array and length from object
+    char* str;
     long len;
+    ser_get_string(obj, Qtrue, &str, &len);
 
-    int type = TYPE(obj);
-    if(type == T_STRING) {
-#ifdef HAVE_RB_STR_ENCODE
-        rb_encoding *enc = rb_enc_get(obj);
-        if (enc != rb_ascii8bit_encoding()) {
-            rb_encoding *utf8 = rb_utf8_encoding();
-            if (enc != utf8) obj = rb_str_encode(obj, rb_enc_from_encoding(utf8), 0, Qnil);
-        }
-#endif
-        str = RSTRING_PTR(obj);
-        len = RSTRING_LEN(obj);
-    } else if(type == T_SYMBOL) {
-        str = rb_id2name(SYM2ID(obj));
-        len = strlen(str);
-    } else {
-        rb_raise(rb_eArgError, "Invalid type in ser0_write_string: %d", type);
-    }
-
+    // Write string
     if(len > 0xffff) {
         if(write_marker == Qtrue) ser_write_byte(ser, AMF0_LONG_STRING_MARKER);
         ser_write_uint32(ser, len);
@@ -248,7 +233,7 @@ static void ser0_write_string(AMF_SERIALIZER *ser, VALUE obj, VALUE write_marker
         if(write_marker == Qtrue) ser_write_byte(ser, AMF0_STRING_MARKER);
         ser_write_uint16(ser, len);
     }
-    ser_write(ser, str, len);
+    rb_str_buf_cat(ser->stream, str, len);
 }
 
 /*
@@ -376,11 +361,15 @@ static VALUE ser0_write_date(VALUE self, VALUE date) {
  *
  * Serializes the object to a string and returns that string
  */
-static VALUE ser0_serialize(VALUE self, VALUE obj) {
+VALUE ser0_serialize(VALUE self, VALUE obj) {
     AMF_SERIALIZER *ser;
     Data_Get_Struct(self, AMF_SERIALIZER, ser);
 
-    if(ser->depth == -1) return Qnil;
+    if(ser->depth == 0) {
+        // Initialize caches
+        ser->obj_cache = st_init_numtable();
+        ser->obj_index = 0;
+    }
     ser->depth++;
 
     int type = TYPE(obj);
@@ -425,32 +414,11 @@ static VALUE ser0_serialize(VALUE self, VALUE obj) {
     ser->depth--;
 
     if(ser->depth == 0) {
-        ser->depth = -1;
-        return rb_str_new(ser->stream, ser->len);
-    } else {
-        return Qnil;
+        // Clean up
+        xfree(ser->obj_cache);
+        ser->obj_cache = NULL;
     }
-}
-
-static VALUE ser3_alloc(VALUE klass) {
-    AMF_SERIALIZER *ser = ALLOC(AMF_SERIALIZER);
-    memset(ser, 0, sizeof(AMF_SERIALIZER));
-    VALUE self = Data_Wrap_Struct(klass, NULL, ser_free, ser);
-
-    // Initialize stream
-    ser->stream = ALLOC_N(char, INITIAL_STREAM_LENGTH);
-    ser->len = 0;
-    ser->size = INITIAL_STREAM_LENGTH;
-
-    // Initialize caches
-    ser->str_cache = st_init_strtable();
-    ser->str_index = 0;
-    ser->trait_cache = st_init_strtable();
-    ser->trait_index = 0;
-    ser->obj_cache = st_init_numtable();
-    ser->obj_index = 0;
-
-    return self;
+    return ser->stream;
 }
 
 /*
@@ -465,17 +433,52 @@ static VALUE ser3_version(VALUE self) {
 }
 
 /*
+ * Writes an AMF3 style string. Accepts strings, symbols, and nil, and handles
+ * all the necessary encoding and caching.
+ */
+static void ser3_write_utf8vr(AMF_SERIALIZER *ser, VALUE obj) {
+    // Extract char array and length from object
+    char* str;
+    long len;
+    ser_get_string(obj, Qtrue, &str, &len);
+
+    // Write string
+    VALUE str_index;
+    if(len == 0) {
+        ser_write_byte(ser, AMF3_EMPTY_STRING);
+    } else if(st_lookup(ser->str_cache, (st_data_t)str, &str_index)) {
+        ser_write_int(ser, FIX2INT(str_index) << 1);
+    } else {
+        st_add_direct(ser->str_cache, (st_data_t)strdup(str), LONG2FIX(ser->str_index));
+        ser->str_index++;
+
+        ser_write_int(ser, ((int)len) << 1 | 1);
+        rb_str_buf_cat(ser->stream, str, len);
+    }
+}
+
+/*
  * call-seq:
  *   ser.write_array(ary) => ser
  *
  * Writes the given array using AMF3 notation
  */
 static VALUE ser3_write_array(VALUE self, VALUE ary) {
+    static VALUE class_mapper = 0;
+    if(class_mapper == 0) class_mapper = rb_const_get(mRocketAMF, rb_intern("ClassMapper"));
     AMF_SERIALIZER *ser;
     Data_Get_Struct(self, AMF_SERIALIZER, ser);
 
+    // Is it an array collection?
+    VALUE is_ac = Qfalse;
+    if(rb_respond_to(ary, id_is_array_collection)) {
+        is_ac = rb_funcall(ary, id_is_array_collection, 0);
+    } else {
+        is_ac = rb_funcall(class_mapper, id_use_array_collection, 0);
+    }
+
     // Write type marker
-    ser_write_byte(ser, AMF3_ARRAY_MARKER);
+    ser_write_byte(ser, is_ac ? AMF3_OBJECT_MARKER : AMF3_ARRAY_MARKER);
 
     // Write object ref, or cache it
     VALUE obj_id = rb_obj_id(ary);
@@ -486,6 +489,22 @@ static VALUE ser3_write_array(VALUE self, VALUE ary) {
     } else {
         st_add_direct(ser->obj_cache, obj_id, LONG2FIX(ser->obj_index));
         ser->obj_index++;
+        if(is_ac) ser->obj_index++; // The array collection source array
+    }
+
+    // Write out traits and array marker if it's an array collection
+    if(is_ac) {
+        VALUE trait_index;
+        char array_collection_name[34] = "flex.messaging.io.ArrayCollection";
+        if(st_lookup(ser->trait_cache, (st_data_t)array_collection_name, &trait_index)) {
+            ser_write_int(ser, FIX2INT(trait_index) << 2 | 0x01);
+        } else {
+            st_add_direct(ser->trait_cache, (st_data_t)strdup(array_collection_name), LONG2FIX(ser->trait_index));
+            ser->trait_index++;
+            ser_write_byte(ser, 0x07); // Trait header
+            ser3_write_utf8vr(ser, rb_str_new2(array_collection_name));
+        }
+        ser_write_byte(ser, AMF3_ARRAY_MARKER);
     }
 
     // Write header
@@ -500,48 +519,6 @@ static VALUE ser3_write_array(VALUE self, VALUE ary) {
     }
 
     return self;
-}
-
-/*
- * Writes an AMF3 style string. Accepts strings, symbols, and nil, and handles
- * all the necessary encoding and caching.
- */
-static void ser3_write_utf8vr(AMF_SERIALIZER *ser, VALUE obj) {
-    const char* str;
-    long len;
-
-    int type = TYPE(obj);
-    if(type == T_STRING) {
-#ifdef HAVE_RB_STR_ENCODE
-        rb_encoding *enc = rb_enc_get(obj);
-        if (enc != rb_ascii8bit_encoding()) {
-            rb_encoding *utf8 = rb_utf8_encoding();
-            if (enc != utf8) obj = rb_str_encode(obj, rb_enc_from_encoding(utf8), 0, Qnil);
-        }
-#endif
-        str = RSTRING_PTR(obj);
-        len = RSTRING_LEN(obj);
-    } else if(type == T_SYMBOL) {
-        str = rb_id2name(SYM2ID(obj));
-        len = strlen(str);
-    } else if(obj == Qnil) {
-        len = 0;
-    } else {
-        rb_raise(rb_eArgError, "Invalid type in ser3_write_utf8vr: %d", TYPE(obj));
-    }
-
-    VALUE str_index;
-    if(len == 0) {
-        ser_write_byte(ser, AMF3_EMPTY_STRING);
-    } else if(st_lookup(ser->str_cache, (st_data_t)str, &str_index)) {
-        ser_write_int(ser, FIX2INT(str_index) << 1);
-    } else {
-        st_add_direct(ser->str_cache, (st_data_t)strdup(str), LONG2FIX(ser->str_index));
-        ser->str_index++;
-
-        ser_write_int(ser, ((int)len) << 1 | 1);
-        ser_write(ser, str, len);
-    }
 }
 
 /*
@@ -643,7 +620,7 @@ static VALUE ser3_write_object0(VALUE self, VALUE obj, VALUE props, VALUE traits
 
     // Raise exception if marked externalizable
     if(externalizable == Qtrue) {
-        rb_raise(rb_eRuntimeError, "externalizable serialization unsupported in native extension");
+        rb_funcall(obj, rb_intern("write_external"), 1, self);
         return self;
     }
 
@@ -770,19 +747,29 @@ static VALUE ser3_write_byte_array(VALUE self, VALUE ba) {
     }
 
     // Write byte array
-    ser3_write_utf8vr(ser, rb_funcall(ba, rb_intern("string"), 0));
+    VALUE str = rb_funcall(ba, rb_intern("string"), 0);
+    ser_write_int(ser, RSTRING_LEN(str) << 1 | 1);
+    rb_str_buf_cat(ser->stream, RSTRING_PTR(str), RSTRING_LEN(str));
 }
 
-static VALUE ser3_serialize(VALUE self, VALUE obj) {
+VALUE ser3_serialize(VALUE self, VALUE obj) {
     AMF_SERIALIZER *ser;
     Data_Get_Struct(self, AMF_SERIALIZER, ser);
 
-    if(ser->depth == -1) return Qnil;
+    if(ser->depth == 0) {
+        // Initialize caches
+        ser->str_cache = st_init_strtable();
+        ser->str_index = 0;
+        ser->trait_cache = st_init_strtable();
+        ser->trait_index = 0;
+        ser->obj_cache = st_init_numtable();
+        ser->obj_index = 0;
+    }
     ser->depth++;
 
     int type = TYPE(obj);
     VALUE klass = Qnil;
-    if(type == T_OBJECT || type == T_DATA) {
+    if(type == T_OBJECT || type == T_DATA || type == T_ARRAY) {
         klass = CLASS_OF(obj);
     }
 
@@ -812,7 +799,7 @@ static VALUE ser3_serialize(VALUE self, VALUE obj) {
     } else if(type == T_FALSE) {
         ser_write_byte(ser, AMF3_FALSE_MARKER);
     } else if(type == T_ARRAY) {
-            ser3_write_array(self, obj);
+        ser3_write_array(self, obj);
     } else if(type == T_HASH) {
         ser3_write_object0(self, obj, Qnil, Qnil);
     } else if(klass == rb_cTime) {
@@ -831,27 +818,33 @@ static VALUE ser3_serialize(VALUE self, VALUE obj) {
     ser->depth--;
 
     if(ser->depth == 0) {
-        ser->depth = -1;
-        return rb_str_new(ser->stream, ser->len);
-    } else {
-        return Qnil;
+        // Clean up
+        xfree(ser->str_cache);
+        ser->str_cache = NULL;
+        xfree(ser->trait_cache);
+        ser->trait_cache = NULL;
+        xfree(ser->obj_cache);
+        ser->obj_cache = NULL;
     }
+    return ser->stream;
 }
 
 void Init_rocket_amf_serializer() {
     // Define Serializer
-    VALUE cSerializer = rb_define_class_under(mRocketAMFExt, "Serializer", rb_cObject);
-    rb_define_alloc_func(cSerializer, ser0_alloc);
+    cSerializer = rb_define_class_under(mRocketAMFExt, "Serializer", rb_cObject);
+    rb_define_alloc_func(cSerializer, ser_alloc);
     rb_define_method(cSerializer, "version", ser0_version, 0);
+    rb_define_method(cSerializer, "stream", ser_stream, 0);
     rb_define_method(cSerializer, "serialize", ser0_serialize, 1);
     rb_define_method(cSerializer, "write_array", ser0_write_array, 1);
     rb_define_method(cSerializer, "write_hash", ser0_write_object, -1);
     rb_define_method(cSerializer, "write_object", ser0_write_object, -1);
 
     // Define AMF3Serializer
-    VALUE cAMF3Serializer = rb_define_class_under(mRocketAMFExt, "AMF3Serializer", rb_cObject);
-    rb_define_alloc_func(cAMF3Serializer, ser3_alloc);
+    cAMF3Serializer = rb_define_class_under(mRocketAMFExt, "AMF3Serializer", rb_cObject);
+    rb_define_alloc_func(cAMF3Serializer, ser_alloc);
     rb_define_method(cAMF3Serializer, "version", ser3_version, 0);
+    rb_define_method(cAMF3Serializer, "stream", ser_stream, 0);
     rb_define_method(cAMF3Serializer, "serialize", ser3_serialize, 1);
     rb_define_method(cAMF3Serializer, "write_array", ser3_write_array, 1);
     rb_define_method(cAMF3Serializer, "write_object", ser3_write_object, -1);
@@ -860,6 +853,8 @@ void Init_rocket_amf_serializer() {
     id_size = rb_intern("size");
     id_haskey = rb_intern("has_key?");
     id_encode_amf = rb_intern("encode_amf");
+    id_is_array_collection = rb_intern("is_array_collection?");
+    id_use_array_collection = rb_intern("use_array_collection");
     id_get_as_class_name = rb_intern("get_as_class_name");
     id_props_for_serialization = rb_intern("props_for_serialization");
     id_utc = rb_intern("utc");

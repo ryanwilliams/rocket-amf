@@ -154,7 +154,7 @@ module RocketAMF
       def initialize
         @string_cache = SerializerCache.new :string
         @object_cache = SerializerCache.new :object
-        @trait_cache = SerializerCache.new :trait
+        @trait_cache = SerializerCache.new :string
         @stream = ""
       end
 
@@ -183,8 +183,6 @@ module RocketAMF
           write_date obj
         elsif obj.is_a?(StringIO)
           write_byte_array obj
-        elsif obj.is_a?(RocketAMF::Values::ArrayCollection)
-          write_array_collection obj
         elsif obj.is_a?(Array)
           write_array obj
         elsif obj.is_a?(Hash) || obj.is_a?(Object)
@@ -265,30 +263,53 @@ module RocketAMF
           write_reference @object_cache[array]
         else
           @object_cache.add_obj array
-          write_utf8_vr array.string
+          str = array.string
+          @stream << pack_integer(str.bytesize << 1 | 1)
+          @stream << str
         end
       end
 
-      def write_array_collection array
-        write_object array, nil, {:class_name => RocketAMF::ClassMapper.get_as_class_name(array), :members => [], :externalizable => true, :dynamic => false}
-      end
-
       def write_array array
-        @stream << AMF3_ARRAY_MARKER
+        # Is it an array collection?
+        is_ac = false
+        if array.respond_to?(:is_array_collection?)
+          is_ac = array.is_array_collection?
+        else
+          is_ac = RocketAMF::ClassMapper.use_array_collection
+        end
+
+        # Write type marker
+        @stream << (is_ac ? AMF3_OBJECT_MARKER : AMF3_ARRAY_MARKER)
+
+        # Write reference or cache array
         if @object_cache[array] != nil
           write_reference @object_cache[array]
+          return
         else
-          # Cache array
           @object_cache.add_obj array
+          @object_cache.add_obj nil if is_ac # The array collection source array
+        end
 
-          # Build AMF string
-          header = array.length << 1 # make room for a low bit of 1
-          header = header | 1 # set the low bit to 1
-          @stream << pack_integer(header)
-          @stream << AMF3_CLOSE_DYNAMIC_ARRAY
-          array.each do |elem|
-            serialize elem
+        # Write out traits and array marker if it's an array collection
+        if is_ac
+          class_name = "flex.messaging.io.ArrayCollection"
+          if @trait_cache[class_name] != nil
+            @stream << pack_integer(@trait_cache[class_name] << 2 | 0x01)
+          else
+            @trait_cache.add_obj class_name
+            @stream << "\a" # Externalizable, non-dynamic
+            write_utf8_vr(class_name)
           end
+          @stream << AMF3_ARRAY_MARKER
+        end
+
+        # Build AMF string for array
+        header = array.length << 1 # make room for a low bit of 1
+        header = header | 1 # set the low bit to 1
+        @stream << pack_integer(header)
+        @stream << AMF3_CLOSE_DYNAMIC_ARRAY
+        array.each do |elem|
+          serialize elem
         end
       end
 
@@ -311,12 +332,13 @@ module RocketAMF
                     :dynamic => true
                    }
         end
+        class_name = traits[:class_name]
 
         # Write out traits
-        if traits[:class_name] && @trait_cache[traits] != nil
-          @stream << pack_integer(@trait_cache[traits] << 2 | 0x01)
+        if class_name && @trait_cache[class_name] != nil
+          @stream << pack_integer(@trait_cache[class_name] << 2 | 0x01)
         else
-          @trait_cache.add_obj traits if traits[:class_name]
+          @trait_cache.add_obj class_name if class_name
 
           # Write out trait header
           header = 0x03 # Not object ref and not trait ref
@@ -326,7 +348,7 @@ module RocketAMF
           @stream << pack_integer(header)
 
           # Write out class name
-          write_utf8_vr(traits[:class_name].to_s)
+          write_utf8_vr(class_name.to_s)
 
           # Write out members
           traits[:members].each {|m| write_utf8_vr(m)}
@@ -334,7 +356,7 @@ module RocketAMF
 
         # If externalizable, take externalized data shortcut
         if traits[:externalizable]
-          serialize obj.externalized_data
+          obj.write_external(self)
           return
         end
 
@@ -365,8 +387,15 @@ module RocketAMF
       private
       include RocketAMF::Pure::WriteIOHelpers
 
-      def write_utf8_vr str
-        str = str.encode("UTF-8").force_encoding("ASCII-8BIT") if str.respond_to?(:encode)
+      def write_utf8_vr str, encode=true
+        if str.respond_to?(:encode)
+          if encode
+            str = str.encode("UTF-8")
+          else
+            str = str.dup if str.frozen?
+          end
+          str.force_encoding("ASCII-8BIT")
+        end
 
         if str == ''
           @stream << AMF3_EMPTY_STRING
@@ -377,9 +406,7 @@ module RocketAMF
           @string_cache.add_obj str
 
           # Build AMF string
-          header = str.bytesize << 1 # make room for a low bit of 1
-          header = header | 1 # set the low bit to 1
-          @stream << pack_integer(header)
+          @stream << pack_integer(str.bytesize << 1 | 1)
           @stream << str
         end
       end
@@ -391,8 +418,6 @@ module RocketAMF
           StringCache.new
         elsif type == :object
           ObjectCache.new
-        elsif type == :trait
-          TraitCache.new
         end
       end
 
@@ -418,21 +443,6 @@ module RocketAMF
 
         def add_obj obj
           self[obj.object_id] = @cache_index
-          @cache_index += 1
-        end
-      end
-
-      class TraitCache < Hash #:nodoc:
-        def initialize
-          @cache_index = 0
-        end
-
-        def [] obj
-          super(obj[:class_name])
-        end
-
-        def add_obj obj
-          self[obj[:class_name]] = @cache_index
           @cache_index += 1
         end
       end
