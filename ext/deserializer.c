@@ -249,7 +249,12 @@ static VALUE des0_read_amf3(AMF_DESERIALIZER *des) {
     amf3_des->size = des->size;
 
     // Run it
-    return des3_deserialize(amf3_des_val);
+    VALUE result = des3_deserialize(amf3_des_val);
+
+    // Copy pos back
+    des->pos = amf3_des->pos;
+
+    return result;
 }
 
 /*
