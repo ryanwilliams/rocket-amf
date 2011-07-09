@@ -159,7 +159,6 @@ module RocketAMF
       end
 
       def deserialize(source=nil, opts=nil)
-      def deserialize(source=nil)
         if source
           @source = StringIO === source ? source : StringIO.new(source)
         end
